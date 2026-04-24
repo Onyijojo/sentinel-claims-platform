@@ -1,5 +1,4 @@
 -- Sentinel Claims Platform — Schema Definitions
--- Run once in Redshift Query Editor v2 before creating any tables
 
 -- Staging: temporary landing area — data is COPYed here from S3 landing zone each run
 CREATE SCHEMA IF NOT EXISTS staging;

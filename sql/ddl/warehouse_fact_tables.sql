@@ -1,5 +1,4 @@
 -- Sentinel Claims Platform — Warehouse Fact Tables
--- Run after warehouse_dim_tables.sql (foreign key references must exist first).
 
 -- Fact: Claims
 CREATE TABLE warehouse.fact_claim (

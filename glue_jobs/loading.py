@@ -1,39 +1,6 @@
 """
 Glue Job — Loading
-S3 Landing Zone (Parquet) → Redshift (staging → warehouse → analytics)
 
-Job type: Python Shell (uses Redshift Data API — no Spark, no JDBC driver)
-Input:    s3://sentinel-claims-data/landing/{entity}/{ingestion_date}/ (Parquet)
-Output:   Redshift:
-            staging.stg_*        ← COPY from Parquet
-            warehouse.dim_*      ← SCD Type 2 merge
-            warehouse.fact_*     ← fact inserts
-            analytics.*          ← view refresh
-
-Deploy to Glue: Upload to S3, create a Glue Python Shell job pointing to this script
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REQUIRED GLUE JOB PARAMETERS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  --redshift_endpoint  <workgroup>.<account-id>.<region>.redshift-serverless.amazonaws.com
-  --secret_arn         arn:aws:secretsmanager:...:secret:redshift!sentinel-namespace-admin-...
-  --iam_role_arn       arn:aws:iam::<account-id>:role/sentinel-redshift-role
-
-OPTIONAL GLUE JOB PARAMETERS
-  --ingestion_date  YYYY-MM-DD   (defaults to today)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WHERE TO FIND EACH VALUE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  redshift_endpoint:
-    Redshift → Serverless → Workgroups → sentinel-workgroup → Endpoint
-    Copy only the hostname (not the port or database)
-
-  secret_arn:
-    Secrets Manager → find redshift!sentinel-namespace-admin → copy ARN
-
-  iam_role_arn:
-    IAM → Roles → sentinel-redshift-role → copy ARN
 """
 import json
 import logging
@@ -98,10 +65,9 @@ def run_sql(sql: str, label: str = "") -> None:
         raise RuntimeError(f"SQL failed [{label}]: {e}") from None
 
 
+
 # ── 1. COPY staging tables from Parquet landing zone ────────────────────────
-#
-# FORMAT AS PARQUET lets Redshift infer column types from the Parquet metadata —
-# no need for IGNOREHEADER, DATEFORMAT, or TIMEFORMAT options.
+
 
 STAGING_LOADS = [
     ("stg_claimants", f"{LANDING}/claimants/{INGESTION_DATE}/"),
@@ -137,8 +103,15 @@ try:
         label="COPY schema_evolution_log",
     )
 except RuntimeError as e:
-    if "file not found" in str(e).lower() or "0 rows" in str(e).lower():
+    err = str(e).lower()
+    if "file not found" in err or "0 rows" in err:
         log.info("No schema evolution events today — skipping schema_evolution_log load.")
+    elif "spectrum scan error" in err or "15007" in err:
+        log.warning(
+            "Schema evolution Parquet has incompatible types — skipping load. "
+            "Delete s3://%s/landing/schema_evolution/%s/ and rerun transformation to regenerate.",
+            BUCKET, INGESTION_DATE,
+        )
     else:
         raise
 
@@ -150,7 +123,7 @@ run_sql(
     """
     UPDATE warehouse.dim_claimant
     SET    is_current  = FALSE,
-           expiry_date = CURRENT_DATE - 1
+           effective_to = CURRENT_DATE - 1
     FROM   staging.stg_claimants s
     WHERE  warehouse.dim_claimant.claimant_id = s.claimant_id
       AND  warehouse.dim_claimant.is_current  = TRUE
@@ -164,12 +137,14 @@ run_sql(
     """
     INSERT INTO warehouse.dim_claimant
         (claimant_id, first_name, last_name, date_of_birth, gender,
-         employment_start_date, employer_id, effective_date, expiry_date, is_current)
+         employment_start_date, employer_id, created_at, updated_at,
+         effective_from, effective_to, is_current)
     SELECT s.claimant_id, s.first_name, s.last_name, s.date_of_birth, s.gender,
-           s.employment_start_date, s.employer_id,
-           CURRENT_DATE, '9999-12-31'::DATE, TRUE
+           s.employment_start_date, s.employer_id, s.created_at, s.updated_at,
+           s.effective_from, s.effective_to, s.is_current
     FROM   staging.stg_claimants s
-    WHERE  NOT EXISTS (
+    WHERE  s.is_current = TRUE
+      AND  NOT EXISTS (
         SELECT 1 FROM warehouse.dim_claimant d
         WHERE  d.claimant_id = s.claimant_id AND d.is_current = TRUE
     );
@@ -182,7 +157,7 @@ run_sql(
     """
     UPDATE warehouse.dim_policy
     SET    is_current  = FALSE,
-           expiry_date = CURRENT_DATE - 1
+           effective_to = CURRENT_DATE - 1
     FROM   staging.stg_policies s
     WHERE  warehouse.dim_policy.policy_id    = s.policy_id
       AND  warehouse.dim_policy.is_current   = TRUE
@@ -195,11 +170,14 @@ run_sql(
     """
     INSERT INTO warehouse.dim_policy
         (policy_id, policy_number, coverage_type, start_date, end_date,
-         premium_amount, effective_date, expiry_date, is_current)
+         premium_amount, created_at, updated_at,
+         effective_from, effective_to, is_current)
     SELECT s.policy_id, s.policy_number, s.coverage_type, s.start_date, s.end_date,
-           s.premium_amount, CURRENT_DATE, '9999-12-31'::DATE, TRUE
+           s.premium_amount, s.created_at, s.updated_at,
+           s.effective_from, s.effective_to, s.is_current
     FROM   staging.stg_policies s
-    WHERE  NOT EXISTS (
+    WHERE  s.is_current = TRUE
+      AND  NOT EXISTS (
         SELECT 1 FROM warehouse.dim_policy d
         WHERE  d.policy_id = s.policy_id AND d.is_current = TRUE
     );
@@ -212,7 +190,7 @@ run_sql(
     """
     UPDATE warehouse.dim_employer
     SET    is_current  = FALSE,
-           expiry_date = CURRENT_DATE - 1
+           effective_to = CURRENT_DATE - 1
     FROM   staging.stg_employers s
     WHERE  warehouse.dim_employer.employer_id = s.employer_id
       AND  warehouse.dim_employer.is_current  = TRUE
@@ -226,11 +204,13 @@ run_sql(
     """
     INSERT INTO warehouse.dim_employer
         (employer_id, company_name, industry, location, policy_id,
-         effective_date, expiry_date, is_current)
+         created_at, updated_at, effective_from, effective_to, is_current)
     SELECT s.employer_id, s.company_name, s.industry, s.location, s.policy_id,
-           CURRENT_DATE, '9999-12-31'::DATE, TRUE
+           s.created_at, s.updated_at,
+           s.effective_from, s.effective_to, s.is_current
     FROM   staging.stg_employers s
-    WHERE  NOT EXISTS (
+    WHERE  s.is_current = TRUE
+      AND  NOT EXISTS (
         SELECT 1 FROM warehouse.dim_employer d
         WHERE  d.employer_id = s.employer_id AND d.is_current = TRUE
     );
@@ -240,9 +220,8 @@ run_sql(
 
 
 # ── 3. Fact tables ───────────────────────────────────────────────────────────
-# Truncate before every load — staging is already fully reloaded each run,
-# so fact tables must be too. This guarantees idempotency regardless of
-# how many times the job has run or failed mid-way.
+# Truncate before every load — staging is already fully reloaded each run
+
 
 run_sql("TRUNCATE warehouse.fact_payment;", label="TRUNCATE fact_payment")
 run_sql("TRUNCATE warehouse.fact_claim;",   label="TRUNCATE fact_claim")

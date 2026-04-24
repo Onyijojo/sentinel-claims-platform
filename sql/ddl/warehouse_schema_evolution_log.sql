@@ -1,6 +1,5 @@
 -- Sentinel Claims Platform — Schema Evolution Log Table
 -- Stores a record every time a column is added or removed from any entity.
--- Populated by loading.py via COPY from landing/schema_evolution/{date}/
 
 CREATE TABLE IF NOT EXISTS warehouse.schema_evolution_log (
     log_id           BIGINT IDENTITY(1,1) PRIMARY KEY,

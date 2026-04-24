@@ -1,43 +1,6 @@
 """
 Glue Job — Extraction
-Google Drive Folder → S3 Raw Zone
 
-Job type: Python Shell (boto3 + gdown, no Spark needed)
-
-Downloads all CSV files from a shared Google Drive folder and uploads them
-to the S3 raw zone with date partitioning and MD5 checksum tagging.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WHERE TO ADD YOUR GOOGLE DRIVE FOLDER ID
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-In the Glue job → Job details → Job parameters, add ONE entry:
-
-  Key:   --gdrive_folder_id
-  Value: <your folder ID>
-
-How to find the folder ID from a Google Drive folder link:
-  Link:  https://drive.google.com/drive/folders/1b0QIHpwSmbV_jeOHAvrxUeOCR0Shvo9K
-  ID:    1b0QIHpwSmbV_jeOHAvrxUeOCR0Shvo9K
-  (everything after /folders/)
-
-The folder must be shared as "Anyone with the link can view".
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OPTIONAL PARAMETER
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  --ingestion_date  YYYY-MM-DD   (omit to default to today's date)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-GLUE SETUP
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Job type:                Python Shell
-Python version:          3.9
-Additional Python libs:  gdown
-
-Upload this script:
-  aws s3 cp glue_jobs/extraction.py s3://sentinel-claims-data/glue-scripts/extraction.py
-
-Output:  s3://sentinel-claims-data/raw/{entity}/{ingestion_date}/{file}.csv
 """
 import hashlib
 import logging

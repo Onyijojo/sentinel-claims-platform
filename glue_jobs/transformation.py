@@ -1,25 +1,3 @@
-"""
-Glue Job — Transformation
-S3 Raw Zone (CSV) → S3 Landing Zone (Parquet)
-
-Job type: Glue Spark ETL (PySpark)
-Input:    s3://sentinel-claims-data/raw/{entity}/{ingestion_date}/
-Output:   s3://sentinel-claims-data/landing/{entity}/{ingestion_date}/ (Parquet)
-
-Key behaviours:
-  - Schema evolution is detected for every entity on every run.
-    Changes are logged to S3 (audit trail) and written as a small Parquet
-    file to landing/schema_evolution/ so loading.py can COPY them into
-    warehouse.schema_evolution_log for historical querying.
-  - Claims v1 and v2 are unified into a single dataset.
-    v1 rows get claim_severity = 'unknown' to align with v2's schema.
-  - Rows with NULL policy_id are dropped from claims —
-    unlinked claims cannot be joined to the dimensional model.
-  - All other data quality rules are applied (NULL fills, casing, type casts).
-
-Run locally (requires PySpark):  spark-submit glue_jobs/transformation.py
-Deploy to Glue:                   Upload to S3, create a Glue Spark ETL job
-"""
 import json
 import logging
 import os
@@ -30,6 +8,7 @@ import boto3
 from pyspark.context import SparkContext
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType
+from pyspark.sql.window import Window
 
 try:
     from awsglue.context import GlueContext
@@ -66,6 +45,24 @@ LANDING = f"s3://{BUCKET}/landing"
 REGISTRY_PREFIX = "schema_registry"
 
 s3 = boto3.client("s3")
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def trim_strings(df):
+    """Trim leading/trailing whitespace from every string column."""
+    for c, t in df.dtypes:
+        if t == "string":
+            df = df.withColumn(c, F.trim(F.col(c)))
+    return df
+
+
+def ensure_columns(df, cols):
+    """Add any missing columns as NULL so downstream transforms don't fail."""
+    for c in cols:
+        if c not in df.columns:
+            df = df.withColumn(c, F.lit(None).cast(StringType()))
+    return df
 
 
 # ── Schema Evolution Tracking ───────────────────────────────────────────────
@@ -143,6 +140,7 @@ def write_evolution_log(events: list) -> None:
         log.info("No schema evolution events today.")
         return
     ev_df = spark.createDataFrame(events)
+    ev_df = ev_df.withColumn("detection_date", F.to_date(F.col("detection_date")))
     path = f"{LANDING}/schema_evolution/{INGESTION_DATE}/"
     ev_df.write.mode("overwrite").parquet(path)
     log.info("Wrote %d evolution event(s) → %s", len(events), path)
@@ -154,6 +152,11 @@ def transform_claimants():
     df = spark.read.option("header", True).option("inferSchema", True).csv(
         f"{RAW}/claimants/{INGESTION_DATE}/"
     )
+    df = trim_strings(df)
+    df = ensure_columns(df, [
+        "claimant_id", "first_name", "last_name", "date_of_birth", "gender",
+        "employment_start_date", "employer_id", "created_at", "updated_at",
+    ])
     df = (
         df
         # Fill NULL gender — 330 nulls in source data
@@ -165,6 +168,15 @@ def transform_claimants():
         .withColumn("created_at", F.to_timestamp(F.col("created_at")))
         .withColumn("updated_at", F.to_timestamp(F.col("updated_at")))
         .filter(F.col("claimant_id").isNotNull())
+    )
+    w = Window.partitionBy("claimant_id").orderBy(F.col("updated_at").desc())
+    df = (
+        df
+        .withColumn("rn", F.row_number().over(w))
+        .withColumn("effective_from", F.to_date(F.col("created_at")))
+        .withColumn("effective_to", F.lit(None).cast("date"))
+        .withColumn("is_current", F.when(F.col("rn") == 1, F.lit(True)).otherwise(F.lit(False)))
+        .drop("rn")
     )
     return df
 
@@ -188,6 +200,19 @@ def transform_claims():
     v2 = spark.read.option("header", True).option("inferSchema", True).csv(
         f"{RAW}/claims/{INGESTION_DATE}/claims_v2.csv"
     )
+
+    v1 = trim_strings(v1)
+    v2 = trim_strings(v2)
+
+    required_cols = [
+        "claim_id", "claimant_id", "policy_id",
+        "incident_date", "report_date",
+        "claim_type", "claim_status", "claim_severity",
+        "claim_amount", "approved_amount",
+        "created_at", "updated_at",
+    ]
+    v1 = ensure_columns(v1, required_cols)
+    v2 = ensure_columns(v2, required_cols)
 
     # Add claim_severity to v1 rows before union
     v1 = v1.withColumn("claim_severity", F.lit("unknown").cast(StringType()))
@@ -222,21 +247,41 @@ def transform_claims():
 
 
 def transform_employers():
-    return (
+    df = (
         spark.read.option("header", True).option("inferSchema", True)
         .csv(f"{RAW}/employers/{INGESTION_DATE}/")
+    )
+    df = trim_strings(df)
+    df = ensure_columns(df, ["employer_id", "policy_id", "created_at", "updated_at"])
+    df = (
+        df
         .withColumn("employer_id", F.col("employer_id").cast("int"))
         .withColumn("policy_id",   F.col("policy_id").cast("int"))
         .withColumn("created_at",  F.to_timestamp(F.col("created_at")))
         .withColumn("updated_at",  F.to_timestamp(F.col("updated_at")))
         .filter(F.col("employer_id").isNotNull())
     )
+    w = Window.partitionBy("employer_id").orderBy(F.col("updated_at").desc())
+    df = (
+        df
+        .withColumn("rn", F.row_number().over(w))
+        .withColumn("effective_from", F.to_date(F.col("created_at")))
+        .withColumn("effective_to", F.lit(None).cast("date"))
+        .withColumn("is_current", F.col("rn") == 1)
+        .drop("rn")
+    )
+    return df
 
 
 def transform_payments():
-    return (
+    df = (
         spark.read.option("header", True).option("inferSchema", True)
         .csv(f"{RAW}/payments/{INGESTION_DATE}/")
+    )
+    df = trim_strings(df)
+    df = ensure_columns(df, ["payment_id", "claim_id"])
+    df = (
+        df
         .withColumn("payment_id",     F.col("payment_id").cast("int"))
         .withColumn("claim_id",       F.col("claim_id").cast("int"))
         .withColumn("payment_amount", F.col("payment_amount").cast("double"))
@@ -244,12 +289,20 @@ def transform_payments():
         .withColumn("created_at",     F.to_timestamp(F.col("created_at")))
         .filter(F.col("payment_id").isNotNull())
     )
+    return df.dropDuplicates(["payment_id"])
 
 
 def transform_policies():
-    return (
+    df = (
         spark.read.option("header", True).option("inferSchema", True)
         .csv(f"{RAW}/policies/{INGESTION_DATE}/")
+    )
+    df = trim_strings(df)
+    df = ensure_columns(df, [
+        "policy_id", "policy_number", "start_date", "end_date", "created_at", "updated_at",
+    ])
+    df = (
+        df
         .withColumn("policy_id",       F.col("policy_id").cast("int"))
         .withColumn("premium_amount",  F.col("premium_amount").cast("double"))
         .withColumn("start_date",      F.to_date(F.col("start_date")))
@@ -258,6 +311,16 @@ def transform_policies():
         .withColumn("updated_at",      F.to_timestamp(F.col("updated_at")))
         .filter(F.col("policy_id").isNotNull())
     )
+    w = Window.partitionBy("policy_id").orderBy(F.col("updated_at").desc())
+    df = (
+        df
+        .withColumn("rn", F.row_number().over(w))
+        .withColumn("effective_from", F.col("start_date"))
+        .withColumn("effective_to", F.col("end_date"))
+        .withColumn("is_current", F.col("rn") == 1)
+        .drop("rn")
+    )
+    return df
 
 
 def write_parquet(df, entity: str) -> None:

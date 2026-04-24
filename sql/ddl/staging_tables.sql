@@ -11,7 +11,10 @@ CREATE TABLE IF NOT EXISTS staging.stg_claimants (
     employment_start_date DATE,
     employer_id           INTEGER,
     created_at            TIMESTAMP,
-    updated_at            TIMESTAMP
+    updated_at            TIMESTAMP,
+    effective_from        DATE,
+    effective_to          DATE,
+    is_current            BOOLEAN
 );
 
 CREATE TABLE IF NOT EXISTS staging.stg_claims (
@@ -36,7 +39,10 @@ CREATE TABLE IF NOT EXISTS staging.stg_employers (
     location              VARCHAR(200),
     policy_id             INTEGER,
     created_at            TIMESTAMP,
-    updated_at            TIMESTAMP
+    updated_at            TIMESTAMP,
+    effective_from        DATE,
+    effective_to          DATE,
+    is_current            BOOLEAN
 );
 
 CREATE TABLE IF NOT EXISTS staging.stg_payments (
@@ -56,5 +62,8 @@ CREATE TABLE IF NOT EXISTS staging.stg_policies (
     end_date              DATE,
     premium_amount        FLOAT8,
     created_at            TIMESTAMP,
-    updated_at            TIMESTAMP
+    updated_at            TIMESTAMP,
+    effective_from        DATE,
+    effective_to          DATE,
+    is_current            BOOLEAN
 );

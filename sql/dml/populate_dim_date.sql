@@ -1,7 +1,5 @@
 -- Sentinel Claims Platform — Populate Date Dimension
--- Generates dates from 2020-01-01 to 2030-12-31 (4,018 rows).
--- Uses a cross join of digit tables — compatible with Redshift Serverless.
--- Run once after creating warehouse.dim_date.
+
 
 INSERT INTO warehouse.dim_date
 SELECT
