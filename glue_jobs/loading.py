@@ -118,11 +118,11 @@ except RuntimeError as e:
 
 # ── 2. Warehouse layer: SCD Type 2 merge ────────────────────────────────────
 
-# dim_claimant — expire changed rows, insert new current row
+# dim_claimant — expire changed rows, insert new/updated current rows
 run_sql(
     """
     UPDATE warehouse.dim_claimant
-    SET    is_current  = FALSE,
+    SET    is_current   = FALSE,
            effective_to = CURRENT_DATE - 1
     FROM   staging.stg_claimants s
     WHERE  warehouse.dim_claimant.claimant_id = s.claimant_id
@@ -133,6 +133,7 @@ run_sql(
     label="SCD2 expire dim_claimant",
 )
 
+# Brand-new claimants (never existed in dim): effective_from = created_at date from source
 run_sql(
     """
     INSERT INTO warehouse.dim_claimant
@@ -141,22 +142,46 @@ run_sql(
          effective_from, effective_to, is_current)
     SELECT s.claimant_id, s.first_name, s.last_name, s.date_of_birth, s.gender,
            s.employment_start_date, s.employer_id, s.created_at, s.updated_at,
-           s.effective_from, s.effective_to, s.is_current
+           COALESCE(s.effective_from, CURRENT_DATE), NULL, TRUE
     FROM   staging.stg_claimants s
     WHERE  s.is_current = TRUE
+      AND  NOT EXISTS (
+        SELECT 1 FROM warehouse.dim_claimant d
+        WHERE  d.claimant_id = s.claimant_id
+    );
+    """,
+    label="SCD2 insert new dim_claimant",
+)
+
+# Changed claimants (old row just expired): effective_from = today (when the change was detected)
+run_sql(
+    """
+    INSERT INTO warehouse.dim_claimant
+        (claimant_id, first_name, last_name, date_of_birth, gender,
+         employment_start_date, employer_id, created_at, updated_at,
+         effective_from, effective_to, is_current)
+    SELECT s.claimant_id, s.first_name, s.last_name, s.date_of_birth, s.gender,
+           s.employment_start_date, s.employer_id, s.created_at, s.updated_at,
+           CURRENT_DATE, NULL, TRUE
+    FROM   staging.stg_claimants s
+    WHERE  s.is_current = TRUE
+      AND  EXISTS (
+        SELECT 1 FROM warehouse.dim_claimant d
+        WHERE  d.claimant_id = s.claimant_id
+      )
       AND  NOT EXISTS (
         SELECT 1 FROM warehouse.dim_claimant d
         WHERE  d.claimant_id = s.claimant_id AND d.is_current = TRUE
     );
     """,
-    label="SCD2 insert dim_claimant",
+    label="SCD2 insert updated dim_claimant",
 )
 
-# dim_policy — SCD2 (coverage_type or dates changed)
+# dim_policy — SCD2 (coverage_type changed)
 run_sql(
     """
     UPDATE warehouse.dim_policy
-    SET    is_current  = FALSE,
+    SET    is_current   = FALSE,
            effective_to = CURRENT_DATE - 1
     FROM   staging.stg_policies s
     WHERE  warehouse.dim_policy.policy_id    = s.policy_id
@@ -166,6 +191,7 @@ run_sql(
     label="SCD2 expire dim_policy",
 )
 
+# Brand-new policies
 run_sql(
     """
     INSERT INTO warehouse.dim_policy
@@ -174,22 +200,46 @@ run_sql(
          effective_from, effective_to, is_current)
     SELECT s.policy_id, s.policy_number, s.coverage_type, s.start_date, s.end_date,
            s.premium_amount, s.created_at, s.updated_at,
-           s.effective_from, s.effective_to, s.is_current
+           COALESCE(s.effective_from, CURRENT_DATE), NULL, TRUE
     FROM   staging.stg_policies s
     WHERE  s.is_current = TRUE
+      AND  NOT EXISTS (
+        SELECT 1 FROM warehouse.dim_policy d
+        WHERE  d.policy_id = s.policy_id
+    );
+    """,
+    label="SCD2 insert new dim_policy",
+)
+
+# Changed policies
+run_sql(
+    """
+    INSERT INTO warehouse.dim_policy
+        (policy_id, policy_number, coverage_type, start_date, end_date,
+         premium_amount, created_at, updated_at,
+         effective_from, effective_to, is_current)
+    SELECT s.policy_id, s.policy_number, s.coverage_type, s.start_date, s.end_date,
+           s.premium_amount, s.created_at, s.updated_at,
+           CURRENT_DATE, NULL, TRUE
+    FROM   staging.stg_policies s
+    WHERE  s.is_current = TRUE
+      AND  EXISTS (
+        SELECT 1 FROM warehouse.dim_policy d
+        WHERE  d.policy_id = s.policy_id
+      )
       AND  NOT EXISTS (
         SELECT 1 FROM warehouse.dim_policy d
         WHERE  d.policy_id = s.policy_id AND d.is_current = TRUE
     );
     """,
-    label="SCD2 insert dim_policy",
+    label="SCD2 insert updated dim_policy",
 )
 
 # dim_employer — SCD2 (industry or location changed)
 run_sql(
     """
     UPDATE warehouse.dim_employer
-    SET    is_current  = FALSE,
+    SET    is_current   = FALSE,
            effective_to = CURRENT_DATE - 1
     FROM   staging.stg_employers s
     WHERE  warehouse.dim_employer.employer_id = s.employer_id
@@ -200,6 +250,7 @@ run_sql(
     label="SCD2 expire dim_employer",
 )
 
+# Brand-new employers
 run_sql(
     """
     INSERT INTO warehouse.dim_employer
@@ -207,15 +258,38 @@ run_sql(
          created_at, updated_at, effective_from, effective_to, is_current)
     SELECT s.employer_id, s.company_name, s.industry, s.location, s.policy_id,
            s.created_at, s.updated_at,
-           s.effective_from, s.effective_to, s.is_current
+           COALESCE(s.effective_from, CURRENT_DATE), NULL, TRUE
     FROM   staging.stg_employers s
     WHERE  s.is_current = TRUE
+      AND  NOT EXISTS (
+        SELECT 1 FROM warehouse.dim_employer d
+        WHERE  d.employer_id = s.employer_id
+    );
+    """,
+    label="SCD2 insert new dim_employer",
+)
+
+# Changed employers
+run_sql(
+    """
+    INSERT INTO warehouse.dim_employer
+        (employer_id, company_name, industry, location, policy_id,
+         created_at, updated_at, effective_from, effective_to, is_current)
+    SELECT s.employer_id, s.company_name, s.industry, s.location, s.policy_id,
+           s.created_at, s.updated_at,
+           CURRENT_DATE, NULL, TRUE
+    FROM   staging.stg_employers s
+    WHERE  s.is_current = TRUE
+      AND  EXISTS (
+        SELECT 1 FROM warehouse.dim_employer d
+        WHERE  d.employer_id = s.employer_id
+      )
       AND  NOT EXISTS (
         SELECT 1 FROM warehouse.dim_employer d
         WHERE  d.employer_id = s.employer_id AND d.is_current = TRUE
     );
     """,
-    label="SCD2 insert dim_employer",
+    label="SCD2 insert updated dim_employer",
 )
 
 

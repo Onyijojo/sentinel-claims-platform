@@ -173,7 +173,7 @@ def transform_claimants():
     df = (
         df
         .withColumn("rn", F.row_number().over(w))
-        .withColumn("effective_from", F.to_date(F.col("created_at")))
+        .withColumn("effective_from", F.coalesce(F.to_date(F.col("created_at")), F.to_date(F.col("updated_at")), F.current_date()))
         .withColumn("effective_to", F.lit(None).cast("date"))
         .withColumn("is_current", F.when(F.col("rn") == 1, F.lit(True)).otherwise(F.lit(False)))
         .drop("rn")
@@ -265,7 +265,7 @@ def transform_employers():
     df = (
         df
         .withColumn("rn", F.row_number().over(w))
-        .withColumn("effective_from", F.to_date(F.col("created_at")))
+        .withColumn("effective_from", F.coalesce(F.to_date(F.col("created_at")), F.to_date(F.col("updated_at")), F.current_date()))
         .withColumn("effective_to", F.lit(None).cast("date"))
         .withColumn("is_current", F.col("rn") == 1)
         .drop("rn")
@@ -315,7 +315,7 @@ def transform_policies():
     df = (
         df
         .withColumn("rn", F.row_number().over(w))
-        .withColumn("effective_from", F.col("start_date"))
+        .withColumn("effective_from", F.coalesce(F.col("start_date"), F.current_date()))
         .withColumn("effective_to", F.col("end_date"))
         .withColumn("is_current", F.col("rn") == 1)
         .drop("rn")
