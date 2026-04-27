@@ -1,0 +1,15 @@
+version: 2
+models:
+  - name: stg_google_data # Enter the name of the staging model
+    description: "This is the staging model for Google data."
+    columns:
+      - name: user_id #Enter the user id
+        description: "The unique identifier for the user."
+        tests:
+          - unique
+          - not_null
+      - name: enrollment_status #Enter the enrollment status
+        description: "The status of the user's enrollment."
+        tests:
+          - accepted_values:
+              values: ['ACTIVE', 'INACTIVE', 'PENDING']
