@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: google_drive_raw  # The namespace for your raw data
+    type: redshift
+    database: your_redshift_db
+    schema: your_raw_schema  # The schema where you ran the COPY command
+    description: "Source data from Google Drive, loaded into Redshift"
+    tables:
+      - name: your_table_name  # The actual table name in Redshift
+        identifier: your_table_name  # The same as the table name, unless you want to use a different name in dbt
