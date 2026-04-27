@@ -1,25 +1,16 @@
-{{
-  config(
-    materialized='incremental',
-    unique_key='user_id'
-  )
-}}
-
-select * from renamed
-{% if is_incremental() %}
-  -- only look at files added since the last dbt run
-  where dbt_updated_at > (select max(dbt_updated_at) from {{ this }})
-{% endif %}
-
--- Rename 'google_drive_raw.your_table_name' to your actual source table name
+-- Staging model: pulls from the canonical raw source defined in src_google_drive.yml
 with source as (
-    select * from {{ source('google_drive_raw', 'your_table_name') }}
+    select * from {{ source('raw_data_source', 'drive_csv_data') }}
 ),
+
 renamed as (
     select
-        id as user_id,
-        cast(signup_timestamp as timestamp) as created_at,
-        lower(email_address) as email
+        id                                      as user_id,
+        cast(signup_timestamp as timestamp)     as created_at,
+        lower(email_address)                    as email,
+        current_timestamp                       as dbt_updated_at
     from source
+    where id is not null
 )
+
 select * from renamed
