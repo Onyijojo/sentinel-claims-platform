@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: raw_data_source  # A name you choose for the source
+    description: "Source for raw data loaded from Google Drive CSVs."
+    database: your_redshift_db_name # Your Redshift database name
+    schema: your_raw_schema_name  # Where your CSVs were loaded
+    tables:
+      - name: drive_csv_data     # The actual table name in Redshift

@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: raw_claims
+    description: "Raw claims-domain data loaded from CSVs (claimants, policies, claims)."
+    database: your_redshift_db_name   # TODO: set to your actual Redshift database
+    schema: your_raw_schema_name      # TODO: set to the schema where the COPY landed
+    tables:
+      - name: claimants
+        description: "One row per claimant. PK: claimant_id."
+        columns:
+          - name: claimant_id
+            tests:
+              - unique
+              - not_null
+
+      - name: policies
+        description: "One row per policy. PK: policy_id."
+        columns:
+          - name: policy_id
+            tests:
+              - unique
+              - not_null
+
+      - name: claims
+        description: "One row per claim (loaded from claims_v2.csv — supersedes claims_v1)."
+        columns:
+          - name: claim_id
+            tests:
+              - unique
+              - not_null
