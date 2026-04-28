@@ -1,0 +1,68 @@
+version: 2
+
+models:
+  - name: stg_google_data
+    description: "Staging model for Google Drive enrollment data."
+    columns:
+      - name: user_id
+        description: "Unique identifier for the user."
+        tests:
+          - unique
+          - not_null
+      - name: enrollment_status
+        description: "Enrollment lifecycle state."
+        tests:
+          - accepted_values:
+              values: ['ACTIVE', 'INACTIVE', 'PENDING']
+
+  - name: stg_claimants
+    description: "Staging model for claimants (one row per claimant)."
+    columns:
+      - name: claimant_id
+        description: "Natural key from source."
+        tests:
+          - unique
+          - not_null
+      - name: updated_at
+        description: "Used by snp_claimants as the SCD2 change detector."
+        tests:
+          - not_null
+
+  - name: stg_policies
+    description: "Staging model for policies (one row per policy)."
+    columns:
+      - name: policy_id
+        description: "Natural key from source."
+        tests:
+          - unique
+          - not_null
+      - name: updated_at
+        description: "Used by snp_policies as the SCD2 change detector."
+        tests:
+          - not_null
+
+  - name: stg_claims
+    description: "Staging model for claims (loaded from claims_v2)."
+    columns:
+      - name: claim_id
+        description: "Natural key from source."
+        tests:
+          - unique
+          - not_null
+      - name: claimant_id
+        description: "FK to stg_claimants.claimant_id."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_claimants')
+              field: claimant_id
+      - name: policy_id
+        description: "FK to stg_policies.policy_id."
+        tests:
+          - relationships:
+              to: ref('stg_policies')
+              field: policy_id
+      - name: claim_status
+        description: "Uppercased status for downstream consistency."
+        tests:
+          - not_null

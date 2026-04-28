@@ -1,151 +1,127 @@
+"""
+Production data pipeline:  Ingest -> Transform -> Load -> dbt.
+
+DAG-parsing rules followed here:
+    * No expensive setup at module import time. The Airflow scheduler re-parses
+      every DAG file every few seconds, so module-level work runs constantly.
+    * Logging handlers are attached inside task callables (run-time), not here.
+    * Jinja templating only renders inside templated operator parameters
+      (e.g. bash_command), never inside arbitrary Python — so we don't try
+      to template handler kwargs at parse time.
+"""
 import logging
-import sys
+import os
 from datetime import datetime, timedelta
+
 from airflow import DAG
-from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator    # DummyOperator is deprecated
+from airflow.operators.python import PythonOperator
 
-# Try to import watchtower for CloudWatch logging
-try:
-    import watchtower
-    WATCHTOWER_AVAILABLE = True
-except ImportError:
-    WATCHTOWER_AVAILABLE = False
-    print("Warning: watchtower not installed. Using fallback logger.")
+# Reusable failure callback (lives in airflow/callbacks/logger.py)
+from callbacks.logger import on_failure_callback
 
 
-# 2. Configure Logging (CloudWatch via watchtower, with fallback)
-def setup_logging():
+# ---- Helpers -----------------------------------------------------------------
+
+def _attach_cloudwatch_handler():
     """
-    Set up logging to stream to CloudWatch using watchtower.
-    Falls back to standard logging if watchtower is unavailable.
+    Attach a CloudWatch handler to the root logger at TASK runtime.
+
+    Called from inside each PythonOperator callable, never at module load.
+    Safe to call multiple times — guards against duplicate handlers.
     """
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    
-    # Console handler for local debugging
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_format = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    root = logging.getLogger()
+    if any(h.__class__.__name__ == "CloudWatchLogHandler" for h in root.handlers):
+        return  # already attached on this worker
+
+    try:
+        import watchtower  # imported lazily so DAG parse never fails on missing dep
+    except ImportError:
+        root.warning("watchtower not installed; skipping CloudWatch handler.")
+        return
+
+    handler = watchtower.CloudWatchLogHandler(
+        log_group="airflow-dags",
+        # Use real env vars / context — Jinja '{{ ... }}' does NOT render here.
+        stream_name=os.environ.get("AIRFLOW_CTX_TASK_ID", "unknown_task"),
     )
-    console_handler.setFormatter(console_format)
-    logger.addHandler(console_handler)
-    
-    if WATCHTOWER_AVAILABLE:
-        try:
-            # Add CloudWatch handler using watchtower
-            cw_handler = watchtower.CloudWatchLogHandler(
-                log_group='airflow-dags',
-                stream_name='{{ task_instance_key_str }}'
-            )
-            cw_handler.setFormatter(console_format)
-            logger.addHandler(cw_handler)
-            logger.info("CloudWatch logging via watchtower enabled successfully.")
-        except Exception as e:
-            logger.warning(f"Failed to configure watchtower CloudWatch logging: {e}. Using fallback.")
-            _setup_fallback_logging(logger)
-    else:
-        _setup_fallback_logging(logger)
-    
-    return logger
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
 
 
-def _setup_fallback_logging(logger):
-    """
-    Fallback logging setup using the logger.py pattern.
-    This ensures logging works even without watchtower.
-    """
-    # The fallback is already handled by console handler above
-    # The on_failure_callback from logger.py will be used for task failures
-    logger.info("Using fallback logging configuration.")
+# ---- Task callables ----------------------------------------------------------
+
+def run_ingestion():
+    _attach_cloudwatch_handler()
+    log = logging.getLogger(__name__)
+    log.info("Ingesting data from source to S3...")
+    # TODO: import and call your real ingestion function from extract_data.py
 
 
-# Initialize logging
-logger = setup_logging()
+def run_transformation():
+    _attach_cloudwatch_handler()
+    log = logging.getLogger(__name__)
+    log.info("Formatting files / cleaning up S3 bucket...")
 
 
-# 3. Define Failure Callback (from logger.py)
-def on_failure_callback(context):
-    """
-    This function runs whenever a task fails.
-    It logs the error so CloudWatch can pick it up.
-    """
-    dag_id = context['dag'].dag_id
-    task_id = context['task_instance'].task_id
-    err = context.get('exception')
-    
-    logger.error(f"ALARM: Task {task_id} in DAG {dag_id} failed with error: {err}")
+def run_load():
+    _attach_cloudwatch_handler()
+    log = logging.getLogger(__name__)
+    log.info("Executing COPY command to load S3 data into Redshift Raw...")
 
 
-# 4. Define Default Arguments (Retries & Error Handling)
+# ---- DAG ---------------------------------------------------------------------
+
+DBT_PROJECT_DIR = os.environ.get(
+    "DBT_PROJECT_DIR",
+    "/opt/airflow/dbt",  # TODO: override via env or set the real path
+)
+
 default_args = {
-    'owner': 'data_engineering_team',
-    'depends_on_past': False,
-    'email_on_failure': False,  # Set to true and add email to get alerts
-    'email_on_retry': False,
-    'retries': 3,  # Retry up to 3 times if a task fails
-    'retry_delay': timedelta(minutes=5),  # Wait 5 minutes between retries
-    'on_failure_callback': on_failure_callback,
+    "owner": "data_engineering_team",
+    "depends_on_past": False,
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 3,
+    "retry_delay": timedelta(minutes=5),
+    "on_failure_callback": on_failure_callback,
 }
 
-# 2. Instantiate the DAG (Scheduling)
 with DAG(
-    'production_data_pipeline',
+    dag_id="production_data_pipeline",
     default_args=default_args,
-    description='Daily pipeline: Ingest -> Transform -> Load -> dbt',
-    schedule_interval='@daily', # Runs once a day at midnight UTC
-    start_date=datetime(2023, 10, 1), # When the DAG should conceptually start
-    catchup=False, # Don't run historical dates if starting fresh
-    tags=['core_pipeline'],
+    description="Daily pipeline: Ingest -> Transform -> Load -> dbt",
+    schedule_interval="@daily",
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    tags=["core_pipeline"],
 ) as dag:
 
-    # --- 3. Define the Tasks ---
-
-    # Task 1: Ingestion (e.g., triggering your Python script to get Google Drive data)
-    # Note: In reality, you'd import your python function here.
-    def run_ingestion():
-        print("Ingesting data from source to S3...")
-        # Your python logic goes here
-
     ingestion_task = PythonOperator(
-        task_id='ingest_data_to_s3',
+        task_id="ingest_data_to_s3",
         python_callable=run_ingestion,
     )
 
-    # Task 2: Transformation (Pre-load formatting if necessary)
-    def run_transformation():
-        print("Formatting files or cleaning up S3 bucket...")
-
     transformation_task = PythonOperator(
-        task_id='pre_load_transformation',
+        task_id="pre_load_transformation",
         python_callable=run_transformation,
     )
 
-    # Task 3: Load (Moving data from S3 to Redshift)
-    # Note: You can also use the S3ToRedshiftOperator for this!
-    def run_load():
-        print("Executing COPY command to load S3 data into Redshift Raw...")
-
     load_task = PythonOperator(
-        task_id='load_to_redshift_raw',
+        task_id="load_to_redshift_raw",
         python_callable=run_load,
     )
 
-    # Task 4: dbt Run (Executing your data models)
-    # If dbt is installed on the same machine, BashOperator is easiest.
-    # If using dbt Cloud, you would use the DbtCloudRunJobOperator instead.
     dbt_run_task = BashOperator(
-        task_id='run_dbt_models',
-        bash_command='cd /path/to/your/dbt/project && dbt build',
+        task_id="run_dbt_models",
+        # Jinja templating works here — bash_command is a templated field.
+        bash_command=f"cd {DBT_PROJECT_DIR} && dbt deps && dbt build",
     )
 
-    # Optional: A dummy task to signal the pipeline finished successfully
-    pipeline_success = DummyOperator(
-        task_id='pipeline_success'
-    )
+    pipeline_success = EmptyOperator(task_id="pipeline_success")
 
-    # --- 4. Set Task Dependencies (The Orchestration) ---
-    # The ">>" operator dictates the exact order of execution
     ingestion_task >> transformation_task >> load_task >> dbt_run_task >> pipeline_success
