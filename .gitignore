@@ -136,6 +136,24 @@ ENV/
 env.bak/
 venv.bak/
 
+# Terraform
+terraform/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+.terraform.lock.hcl
+terraform/crash.log
+
+# Airflow
+airflow/logs/
+airflow/plugins/
+airflow/dags/__pycache__/
+
+# Data files
+data/
+*.csv
+*.parquet
+
 # Spyder project settings
 .spyderproject
 .spyproject
